@@ -1,0 +1,227 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Codex Auto-Fix on Build Failure
+# ──────────────────────────────────────────────────────────────────────────────
+# Triggers when "Build IfcOpenShell C++ (Windows x64 MSVC)" fails.
+# Codex reads the repo + build logs, applies a minimal fix, and opens a PR.
+#
+# REQUIRED SECRETS:
+#   - OPENAI_API_KEY  (repo Settings → Secrets → Actions)
+#
+# REQUIRED REPO SETTINGS:
+#   - Settings → Actions → General → Workflow permissions:
+#     ✅ "Read and write permissions"
+#     ✅ "Allow GitHub Actions to create and approve pull requests"
+# ──────────────────────────────────────────────────────────────────────────────
+
+name: Codex Auto-Fix Build Errors
+
+on:
+  # ── Auto-trigger: fires when the build workflow completes ──
+  workflow_run:
+    workflows: ["Build IfcOpenShell C++ (Windows x64 MSVC)"]
+    types: [completed]
+
+  # ── Manual trigger: paste a failed run URL or describe the issue ──
+  workflow_dispatch:
+    inputs:
+      issue_description:
+        description: "Describe the build issue for Codex to fix"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read       # needed to download build logs
+
+jobs:
+  # ════════════════════════════════════════════════════════════════════════════
+  # Job 1: Fetch build logs from the failed run
+  # ════════════════════════════════════════════════════════════════════════════
+  fetch-logs:
+    name: Fetch Build Logs
+    # Only run on failure (or manual dispatch)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+
+    outputs:
+      failed_branch: ${{ steps.meta.outputs.branch }}
+      failed_sha: ${{ steps.meta.outputs.sha }}
+      has_logs: ${{ steps.logs.outputs.has_logs }}
+
+    steps:
+      - name: Gather failure metadata
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "branch=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "branch=${{ github.event.workflow_run.head_branch }}" >> "$GITHUB_OUTPUT"
+            echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download build logs from failed run
+        id: logs
+        if: github.event_name == 'workflow_run'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runId = context.payload.workflow_run.id;
+            const fs = require('fs');
+
+            // Download the full log archive
+            try {
+              const logs = await github.rest.actions.downloadWorkflowRunLogs({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: runId,
+              });
+
+              fs.writeFileSync('build-logs.zip', Buffer.from(logs.data));
+              core.setOutput('has_logs', 'true');
+              console.log('Build logs downloaded successfully');
+            } catch (err) {
+              console.log('Could not download logs:', err.message);
+              core.setOutput('has_logs', 'false');
+            }
+
+      - name: Extract logs
+        if: steps.logs.outputs.has_logs == 'true'
+        run: |
+          mkdir -p build-logs
+          unzip -o build-logs.zip -d build-logs/ || true
+          # Combine all log files into one for Codex
+          echo "=== COMBINED BUILD LOGS ===" > build-failure.log
+          find build-logs/ -name "*.txt" -exec sh -c \
+            'echo "--- FILE: {} ---" >> build-failure.log && cat {} >> build-failure.log' \;
+          # Trim to last 500 lines (most relevant errors are at the end)
+          tail -n 500 build-failure.log > build-failure-trimmed.log
+          echo "Log size: $(wc -l < build-failure-trimmed.log) lines"
+
+      - name: Upload logs as artifact
+        if: steps.logs.outputs.has_logs == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-failure-logs
+          path: build-failure-trimmed.log
+          retention-days: 7
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Job 2: Run Codex to diagnose and fix
+  # ════════════════════════════════════════════════════════════════════════════
+  codex-fix:
+    name: Codex Diagnose & Fix
+    needs: fetch-logs
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+    steps:
+      - name: Check API Key
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::error::OPENAI_API_KEY secret is not set. Add it in repo Settings → Secrets."
+            exit 1
+          fi
+
+      - name: Checkout repo at failing commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.fetch-logs.outputs.failed_sha }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Download build logs
+        if: needs.fetch-logs.outputs.has_logs == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: build-failure-logs
+          path: .codex-context/
+
+      - name: Prepare context for Codex
+        run: |
+          mkdir -p .codex-context
+
+          # Copy the build workflow so Codex can see it
+          cp .github/workflows/build-windows-x64.yml .codex-context/ 2>/dev/null || true
+
+          # Create a build-error summary if no logs were downloaded
+          if [ ! -f .codex-context/build-failure-trimmed.log ]; then
+            echo "No build logs available. Manual trigger." > .codex-context/build-failure-trimmed.log
+            if [ -n "${{ github.event.inputs.issue_description }}" ]; then
+              echo "" >> .codex-context/build-failure-trimmed.log
+              echo "User description: ${{ github.event.inputs.issue_description }}" >> .codex-context/build-failure-trimmed.log
+            fi
+          fi
+
+          # List the project structure for orientation
+          echo "=== PROJECT STRUCTURE (depth 3) ===" > .codex-context/project-tree.txt
+          find . -maxdepth 3 -type f \
+            \( -name "CMakeLists.txt" -o -name "*.cmake" -o -name "*.h" -o -name "*.cpp" -o -name "*.yml" \) \
+            | head -200 >> .codex-context/project-tree.txt
+
+      # ── Run Codex via the official action ──
+      - name: Run Codex
+        uses: openai/codex-action@v1
+        id: codex
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .github/codex/prompts/fix-build.md
+          sandbox: workspace-write
+          safety-strategy: drop-sudo
+          output-file: codex-output.md
+          codex-args: '["--full-auto"]'
+
+      - name: Show Codex output
+        if: always()
+        run: |
+          echo "=== Codex Output ==="
+          cat codex-output.md 2>/dev/null || echo "(no output file)"
+          echo ""
+          echo "=== Files changed by Codex ==="
+          git diff --stat || true
+
+      # ── Create a PR with the fix ──
+      - name: Create Pull Request
+        if: success()
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "fix(build): auto-fix Windows x64 build via Codex"
+          branch: codex/auto-fix-${{ github.run_id }}
+          base: ${{ needs.fetch-logs.outputs.failed_branch }}
+          title: "🤖 Codex: Auto-fix Windows x64 build failure"
+          body: |
+            ## Codex Auto-Fix
+
+            Codex automatically generated this PR in response to a build failure.
+
+            **Failed workflow:** `Build IfcOpenShell C++ (Windows x64 MSVC)`
+            **Failed branch:** `${{ needs.fetch-logs.outputs.failed_branch }}`
+            **Failed commit:** `${{ needs.fetch-logs.outputs.failed_sha }}`
+
+            ### What Codex did
+            ```
+            $(cat codex-output.md 2>/dev/null || echo "See changed files below")
+            ```
+
+            ### ⚠️ Review carefully
+            This is an automated fix. Please review the changes before merging.
+            Re-run the build workflow to verify the fix works.
+          labels: |
+            automated
+            codex-fix
+          delete-branch: true
+
+      - name: Upload Codex output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-debug-output
+          path: |
+            codex-output.md
+            .codex-context/
+          retention-days: 7

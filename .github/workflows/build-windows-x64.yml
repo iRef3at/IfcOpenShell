@@ -1,0 +1,167 @@
+# IfcOpenShell C++ Windows x64 MSVC Build
+# Builds IfcOpenShell C++ libraries using vcpkg for dependency management.
+# Produces headers + libs as a downloadable artifact.
+
+name: Build IfcOpenShell C++ (Windows x64 MSVC)
+
+on:
+  push:
+    branches: ["v0.8.0"]
+  pull_request:
+    branches: ["v0.8.0"]
+  workflow_dispatch: # Manual trigger
+
+env:
+  BUILD_TYPE: Release
+  VCPKG_DEFAULT_TRIPLET: x64-windows
+  # Pin a vcpkg commit for reproducible builds
+  VCPKG_COMMIT: "01f602195983451bc83e72f4214af2cbc495aa94" # 2024.05.24
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 180 # OCCT build can be slow
+
+    steps:
+      # ─────────────────────────────────────────────
+      # 1. Checkout IfcOpenShell with submodules
+      # ─────────────────────────────────────────────
+      - name: Checkout IfcOpenShell
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ─────────────────────────────────────────────
+      # 2. Setup MSVC environment
+      # ─────────────────────────────────────────────
+      - name: Setup MSVC Developer Environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # ─────────────────────────────────────────────
+      # 3. Cache vcpkg packages (saves ~1hr on rebuilds)
+      # ─────────────────────────────────────────────
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\vcpkg\installed
+            C:\vcpkg\packages
+            C:\vcpkg\buildtrees\*/x64-windows-rel
+          key: vcpkg-win-x64-${{ hashFiles('**/build-windows-x64.yml') }}-v2
+          restore-keys: |
+            vcpkg-win-x64-
+
+      # ─────────────────────────────────────────────
+      # 4. Install dependencies via vcpkg
+      #    Core: opencascade, boost, eigen3, cgal
+      #    Optional: hdf5, libxml2, nlohmann-json
+      # ─────────────────────────────────────────────
+      - name: Install dependencies via vcpkg
+        shell: pwsh
+        run: |
+          # vcpkg is pre-installed on windows-2022 runners at C:\vcpkg
+          & C:\vcpkg\vcpkg.exe integrate install
+
+          # Install IfcOpenShell dependencies
+          # opencascade = OCCT geometry kernel (the big one)
+          # boost = required (system, regex, program-options, etc.)
+          # eigen3 = matrix/linear algebra
+          # cgal = computational geometry
+          # nlohmann-json = JSON support
+          # libxml2 = XML parsing for IFCXML
+          # hdf5 = HDF5 caching support
+          & C:\vcpkg\vcpkg.exe install `
+            opencascade:x64-windows `
+            boost-system:x64-windows `
+            boost-regex:x64-windows `
+            boost-program-options:x64-windows `
+            boost-filesystem:x64-windows `
+            boost-date-time:x64-windows `
+            boost-iostreams:x64-windows `
+            boost-thread:x64-windows `
+            boost-optional:x64-windows `
+            boost-logic:x64-windows `
+            eigen3:x64-windows `
+            cgal:x64-windows `
+            nlohmann-json:x64-windows `
+            libxml2:x64-windows `
+            hdf5:x64-windows
+
+          # Verify installation
+          & C:\vcpkg\vcpkg.exe list
+
+      # ─────────────────────────────────────────────
+      # 5. Configure CMake
+      #    - CMakeLists.txt lives in cmake/ subdirectory
+      #    - Disable Python/SWIG (C++ only build)
+      #    - Disable Collada (avoids OpenCOLLADA dep)
+      #    - Point to vcpkg-installed paths
+      # ─────────────────────────────────────────────
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          $vcpkgRoot = "C:\vcpkg\installed\x64-windows"
+
+          cmake -B build `
+            -G "Visual Studio 17 2022" `
+            -A x64 `
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
+            -DCMAKE_TOOLCHAIN_FILE="C:\vcpkg\scripts\buildsystems\vcpkg.cmake" `
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}\install" `
+            -DOCC_INCLUDE_DIR="$vcpkgRoot\include\opencascade" `
+            -DOCC_LIBRARY_DIR="$vcpkgRoot\lib" `
+            -DCGAL_INCLUDE_DIR="$vcpkgRoot\include" `
+            -DGMP_INCLUDE_DIR="$vcpkgRoot\include" `
+            -DGMP_LIBRARY_DIR="$vcpkgRoot\lib" `
+            -DMPFR_INCLUDE_DIR="$vcpkgRoot\include" `
+            -DMPFR_LIBRARY_DIR="$vcpkgRoot\lib" `
+            -DEIGEN_DIR="$vcpkgRoot\include\eigen3" `
+            -DJSON_INCLUDE_DIR="$vcpkgRoot\include" `
+            -DHDF5_SUPPORT=ON `
+            -DHDF5_INCLUDE_DIR="$vcpkgRoot\include" `
+            -DHDF5_LIBRARY_DIR="$vcpkgRoot\lib" `
+            -DLIBXML2_INCLUDE_DIR="$vcpkgRoot\include\libxml2" `
+            -DLIBXML2_LIBRARIES="$vcpkgRoot\lib\libxml2.lib" `
+            -DCOLLADA_SUPPORT=OFF `
+            -DBUILD_IFCPYTHON=OFF `
+            -DBUILD_EXAMPLES=OFF `
+            -S "${{ github.workspace }}\cmake"
+
+      # ─────────────────────────────────────────────
+      # 6. Build
+      # ─────────────────────────────────────────────
+      - name: Build IfcOpenShell
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} --parallel
+
+      # ─────────────────────────────────────────────
+      # 7. Install to a clean directory
+      # ─────────────────────────────────────────────
+      - name: Install
+        run: cmake --install build --config ${{ env.BUILD_TYPE }}
+
+      # ─────────────────────────────────────────────
+      # 8. Upload build artifacts
+      #    Downloads from: Actions tab → workflow run → Artifacts
+      # ─────────────────────────────────────────────
+      - name: Upload IfcOpenShell build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ifcopenshell-cpp-win-x64-msvc
+          path: ${{ github.workspace }}\install\
+          retention-days: 30
+
+      # ─────────────────────────────────────────────
+      # 9. (Optional) Also upload the raw build dir
+      #    for debugging failed builds
+      # ─────────────────────────────────────────────
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-win-x64
+          path: |
+            build/CMakeFiles/CMakeOutput.log
+            build/CMakeFiles/CMakeError.log
+          retention-days: 7

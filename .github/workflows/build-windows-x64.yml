@@ -20,7 +20,7 @@ env:
 jobs:
   build:
     runs-on: windows-2022
-    timeout-minutes: 180 # OCCT build can be slow
+    timeout-minutes: 240 # Full boost + OCCT build can be very slow first time
 
     steps:
       # ─────────────────────────────────────────────
@@ -49,7 +49,7 @@ jobs:
             C:\vcpkg\installed
             C:\vcpkg\packages
             C:\vcpkg\buildtrees\*/x64-windows-rel
-          key: vcpkg-win-x64-${{ hashFiles('**/build-windows-x64.yml') }}-v2
+          key: vcpkg-win-x64-${{ hashFiles('**/build-windows-x64.yml') }}-v3
           restore-keys: |
             vcpkg-win-x64-
 
@@ -66,7 +66,7 @@ jobs:
 
           # Install IfcOpenShell dependencies
           # opencascade = OCCT geometry kernel (the big one)
-          # boost = required (system, regex, program-options, etc.)
+          # boost = ALL of boost (scope-exit, logic, dynamic-bitset, etc. are all needed)
           # eigen3 = matrix/linear algebra
           # cgal = computational geometry
           # nlohmann-json = JSON support
@@ -74,15 +74,7 @@ jobs:
           # hdf5 = HDF5 caching support
           & C:\vcpkg\vcpkg.exe install `
             opencascade:x64-windows `
-            boost-system:x64-windows `
-            boost-regex:x64-windows `
-            boost-program-options:x64-windows `
-            boost-filesystem:x64-windows `
-            boost-date-time:x64-windows `
-            boost-iostreams:x64-windows `
-            boost-thread:x64-windows `
-            boost-optional:x64-windows `
-            boost-logic:x64-windows `
+            boost:x64-windows `
             eigen3:x64-windows `
             cgal:x64-windows `
             nlohmann-json:x64-windows `

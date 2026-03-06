@@ -44,14 +44,10 @@ jobs:
       # ─────────────────────────────────────────────
       - name: Cache vcpkg packages
         uses: actions/cache@v4
+        id: vcpkg-cache
         with:
-          path: |
-            C:\vcpkg\installed
-            C:\vcpkg\packages
-            C:\vcpkg\buildtrees\*/x64-windows-rel
-          key: vcpkg-win-x64-${{ hashFiles('**/build-windows-x64.yml') }}-v3
-          restore-keys: |
-            vcpkg-win-x64-
+          path: C:\vcpkg\installed
+          key: vcpkg-win-x64-${{ hashFiles('**/build-windows-x64.yml') }}-v4
 
       # ─────────────────────────────────────────────
       # 4. Install dependencies via vcpkg
@@ -63,6 +59,13 @@ jobs:
         run: |
           # vcpkg is pre-installed on windows-2022 runners at C:\vcpkg
           & C:\vcpkg\vcpkg.exe integrate install
+
+          # If cache restored but files are missing, wipe and start fresh
+          $testFile = "C:\vcpkg\installed\x64-windows\include\opencascade\Standard_Version.hxx"
+          if ((Test-Path "C:\vcpkg\installed\x64-windows") -and !(Test-Path $testFile)) {
+            Write-Host "Cache is stale — OCCT headers missing. Removing installed dir."
+            Remove-Item -Recurse -Force "C:\vcpkg\installed"
+          }
 
           # Install IfcOpenShell dependencies
           # opencascade = OCCT geometry kernel (the big one)
@@ -81,7 +84,13 @@ jobs:
             libxml2:x64-windows `
             hdf5:x64-windows
 
-          # Verify installation
+          # Verify critical files exist
+          if (!(Test-Path $testFile)) {
+            Write-Error "OCCT header Standard_Version.hxx still missing after install!"
+            exit 1
+          }
+          Write-Host "Verification passed — OCCT headers present."
+
           & C:\vcpkg\vcpkg.exe list
 
       # ─────────────────────────────────────────────
@@ -96,14 +105,19 @@ jobs:
         run: |
           $vcpkgRoot = "C:\vcpkg\installed\x64-windows"
 
+          # Force OCCT includes globally — IfcOpenShell's CMake doesn't
+          # propagate OCC_INCLUDE_DIR to all targets (IfcGeom misses it).
+          $occInclude = "$vcpkgRoot/include/opencascade"
+
           cmake -B build `
             -G "Visual Studio 17 2022" `
             -A x64 `
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
-            -DCMAKE_TOOLCHAIN_FILE="C:\vcpkg\scripts\buildsystems\vcpkg.cmake" `
-            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}\install" `
-            -DOCC_INCLUDE_DIR="$vcpkgRoot\include\opencascade" `
-            -DOCC_LIBRARY_DIR="$vcpkgRoot\lib" `
+            -DCMAKE_TOOLCHAIN_FILE="C:/vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install" `
+            -DCMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES="$occInclude" `
+            -DOCC_INCLUDE_DIR="$occInclude" `
+            -DOCC_LIBRARY_DIR="$vcpkgRoot/lib" `
             -DCGAL_INCLUDE_DIR="$vcpkgRoot\include" `
             -DGMP_INCLUDE_DIR="$vcpkgRoot\include" `
             -DGMP_LIBRARY_DIR="$vcpkgRoot\lib" `

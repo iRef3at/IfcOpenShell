@@ -47,7 +47,7 @@ jobs:
         id: vcpkg-cache
         with:
           path: C:\vcpkg\installed
-          key: vcpkg-win-x64-${{ hashFiles('**/build-windows-x64.yml') }}-v5
+          key: vcpkg-win-x64-${{ hashFiles('**/build-windows-x64.yml') }}-v7
 
       # ─────────────────────────────────────────────
       # 4. Install dependencies via vcpkg
@@ -74,7 +74,7 @@ jobs:
           # cgal = computational geometry
           # nlohmann-json = JSON support
           # libxml2 = XML parsing for IFCXML
-          # hdf5 = HDF5 caching support
+          # hdf5[cpp] = HDF5 with C++ bindings (H5Cpp.h) — must enable [cpp] feature!
           & C:\vcpkg\vcpkg.exe install `
             opencascade:x64-windows `
             boost:x64-windows `
@@ -82,13 +82,13 @@ jobs:
             cgal:x64-windows `
             nlohmann-json:x64-windows `
             libxml2:x64-windows `
-            hdf5:x64-windows
+            "hdf5[cpp]:x64-windows"
 
           # Verify critical files exist
           $missingFiles = @()
           if (!(Test-Path $testFile)) { $missingFiles += "OCCT: Standard_Version.hxx" }
-          if (!(Test-Path "C:\vcpkg\installed\x64-windows\include\H5Cpp.h")) { $missingFiles += "HDF5: H5Cpp.h" }
           if (!(Test-Path "C:\vcpkg\installed\x64-windows\include\boost\scope_exit.hpp")) { $missingFiles += "Boost: scope_exit.hpp" }
+          if (!(Test-Path "C:\vcpkg\installed\x64-windows\include\H5Cpp.h")) { $missingFiles += "HDF5: H5Cpp.h" }
 
           if ($missingFiles.Count -gt 0) {
             Write-Error "Missing headers after vcpkg install: $($missingFiles -join ', ')"

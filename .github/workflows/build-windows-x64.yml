@@ -47,7 +47,7 @@ jobs:
         id: vcpkg-cache
         with:
           path: C:\vcpkg\installed
-          key: vcpkg-win-x64-${{ hashFiles('**/build-windows-x64.yml') }}-v8
+          key: vcpkg-win-x64-${{ hashFiles('**/build-windows-x64.yml') }}-v9
 
       # ─────────────────────────────────────────────
       # 4. Install dependencies via vcpkg
@@ -96,11 +96,11 @@ jobs:
           }
           Write-Host "Verification passed — all critical headers present."
 
-          # HDF5 2.0 (vcpkg) names libs as hdf5.lib / hdf5_cpp.lib (shared)
-          # IfcOpenShell expects libhdf5.lib / libhdf5_cpp.lib (static naming)
-          # Create copies with the expected names
+          # vcpkg shared libs use names like hdf5.lib, zlib.lib
+          # IfcOpenShell expects static-style names: libhdf5.lib, libzlib.lib
+          # Create copies with the expected names for all potential mismatches
           $libDir = "C:\vcpkg\installed\x64-windows\lib"
-          @("hdf5", "hdf5_cpp") | ForEach-Object {
+          @("hdf5", "hdf5_cpp", "zlib", "szip", "sz", "lzma", "iconv", "charset", "xml2") | ForEach-Object {
             $src = "$libDir\$_.lib"
             $dst = "$libDir\lib$_.lib"
             if ((Test-Path $src) -and !(Test-Path $dst)) {

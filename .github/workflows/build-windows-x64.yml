@@ -102,7 +102,7 @@ jobs:
           $libDir = "C:\vcpkg\installed\x64-windows\lib"
 
           # Standard lib prefix aliases
-          @("hdf5", "hdf5_cpp", "zlib", "szip", "lzma", "iconv", "charset", "xml2") | ForEach-Object {
+          @("hdf5", "hdf5_cpp", "zlib", "szip", "lzma", "iconv", "charset", "xml2", "aec") | ForEach-Object {
             $src = "$libDir\$_.lib"
             $dst = "$libDir\lib$_.lib"
             if ((Test-Path $src) -and !(Test-Path $dst)) {

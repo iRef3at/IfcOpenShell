@@ -111,15 +111,37 @@ jobs:
               }
             }
 
-            # HDF5 szip compatibility (libaec replaces sz)
+          #  # HDF5 szip compatibility (libaec replaces sz)
+          #  $src = "$libDir\aec.lib"
+          #  $dst = "$libDir\libsz.lib"
+          #  if ((Test-Path $src) -and !(Test-Path $dst)) {
+          #    Copy-Item $src $dst
+          #    Write-Host "Created alias: libsz.lib -> aec.lib"
+          #  }
+          #& C:\vcpkg\vcpkg.exe list
+
+            # Explicit AEC aliases
             $src = "$libDir\aec.lib"
-            $dst = "$libDir\libsz.lib"
-            if ((Test-Path $src) -and !(Test-Path $dst)) {
-              Copy-Item $src $dst
+
+            if (!(Test-Path $src)) {
+              Write-Error "Expected AEC import library not found: $src"
+              Get-ChildItem $libDir | Where-Object { $_.Name -match 'aec|sz' } | Select-Object Name, FullName
+              exit 1
+            }
+
+            $dstAec = "$libDir\libaec.lib"
+            if (!(Test-Path $dstAec)) {
+              Copy-Item $src $dstAec -Force
+              Write-Host "Created alias: libaec.lib -> aec.lib"
+            }
+
+            $dstSz = "$libDir\libsz.lib"
+            if (!(Test-Path $dstSz)) {
+              Copy-Item $src $dstSz -Force
               Write-Host "Created alias: libsz.lib -> aec.lib"
             }
-          & C:\vcpkg\vcpkg.exe list
 
+            Get-Item $src, $dstAec, $dstSz | Select-Object Name, FullName, Length
       # ─────────────────────────────────────────────
       # 5. Configure CMake
       #    - CMakeLists.txt lives in cmake/ subdirectory

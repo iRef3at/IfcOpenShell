@@ -25,58 +25,20 @@ env:
 
 jobs:
   build:
-    # Prevent duplicate run when the scheduled sync pushes back to origin
-    if: >
-      github.event_name != 'push' ||
-      github.actor != 'github-actions[bot]' ||
-      !contains(github.event.head_commit.message, '[upstream-sync]')
     runs-on: windows-2022
     timeout-minutes: 240 # Full boost + OCCT build can be very slow first time
 
     steps:
       # ─────────────────────────────────────────────
-      # 1. Checkout fork branch with submodules
+      # 1. Checkout IfcOpenShell with submodules
       # ─────────────────────────────────────────────
       - name: Checkout IfcOpenShell
         uses: actions/checkout@v4
         with:
-          ref: v0.8.0
-          fetch-depth: 0
           submodules: recursive
 
       # ─────────────────────────────────────────────
-      # 2. On scheduled runs, sync fork branch from upstream
-      #    while preserving this repo's .github/workflows
-      # ─────────────────────────────────────────────
-      - name: Sync fork from upstream (preserve local workflows)
-        if: github.event_name == 'schedule'
-        shell: pwsh
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git remote remove upstream 2>$null
-          git remote add upstream https://github.com/IfcOpenShell/IfcOpenShell.git
-          git fetch upstream v0.8.0
-
-          # Update everything from upstream/v0.8.0 except .github/workflows
-          git restore --source=upstream/v0.8.0 --staged --worktree -- . ":(exclude).github/workflows"
-
-          # Keep submodules aligned with the synced tree
-          git submodule sync --recursive
-          git submodule update --init --recursive --depth=1
-
-          if (git diff --quiet --ignore-submodules=dirty --exit-code) {
-            Write-Host "No upstream changes to sync."
-          } else {
-            git add -A
-            git commit -m "[upstream-sync] Sync fork from upstream/v0.8.0 (exclude workflows)"
-            git push origin HEAD:v0.8.0
-            Write-Host "Fork branch v0.8.0 updated from upstream."
-          }
-
-      # ─────────────────────────────────────────────
-      # 3. Setup MSVC environment
+      # 2. Setup MSVC environment
       # ─────────────────────────────────────────────
       - name: Setup MSVC Developer Environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -84,17 +46,17 @@ jobs:
           arch: x64
 
       # ─────────────────────────────────────────────
-      # 4. Cache vcpkg packages (saves ~1hr on rebuilds)
+      # 3. Cache vcpkg packages (saves ~1hr on rebuilds)
       # ─────────────────────────────────────────────
       - name: Cache vcpkg packages
         uses: actions/cache@v4
         id: vcpkg-cache
         with:
           path: C:\vcpkg\installed
-          key: vcpkg-win-x64-${{ hashFiles('**/build-windows-x64.yml') }}-v10
+          key: vcpkg-win-x64-${{ hashFiles('**/build-windows-x64.yml') }}-v9
 
       # ─────────────────────────────────────────────
-      # 5. Install dependencies via vcpkg
+      # 4. Install dependencies via vcpkg
       #    Core: opencascade, boost, eigen3, cgal
       #    Optional: hdf5, libxml2, nlohmann-json
       # ─────────────────────────────────────────────
@@ -113,12 +75,12 @@ jobs:
 
           # Install IfcOpenShell dependencies
           # opencascade = OCCT geometry kernel (the big one)
-          # boost = ALL of boost
+          # boost = ALL of boost (scope-exit, logic, dynamic-bitset, etc. are all needed)
           # eigen3 = matrix/linear algebra
           # cgal = computational geometry
           # nlohmann-json = JSON support
           # libxml2 = XML parsing for IFCXML
-          # hdf5[cpp] = HDF5 with C++ bindings
+          # hdf5[cpp] = HDF5 with C++ bindings (H5Cpp.h) — must enable [cpp] feature!
           & C:\vcpkg\vcpkg.exe install `
             opencascade:x64-windows `
             boost:x64-windows `
@@ -140,32 +102,54 @@ jobs:
           }
           Write-Host "Verification passed — all critical headers present."
 
-          # Explicit AEC aliases
+          # vcpkg shared libs use names like hdf5.lib, zlib.lib
+          # IfcOpenShell expects static-style names: libhdf5.lib, libzlib.lib
+          # Create copies with the expected names for all potential mismatches
           $libDir = "C:\vcpkg\installed\x64-windows\lib"
-          $src = "$libDir\aec.lib"
 
-          if (!(Test-Path $src)) {
-            Write-Error "Expected AEC import library not found: $src"
-            Get-ChildItem $libDir | Where-Object { $_.Name -match 'aec|sz' } | Select-Object Name, FullName
-            exit 1
-          }
+          # Standard lib prefix aliases
+          @("hdf5", "hdf5_cpp", "zlib", "szip", "lzma", "iconv", "charset", "xml2", "aec") | ForEach-Object {
+            $src = "$libDir\$_.lib"
+            $dst = "$libDir\lib$_.lib"
+            if ((Test-Path $src) -and !(Test-Path $dst)) {
+                Copy-Item $src $dst
+                Write-Host "Created alias: lib$_.lib -> $_.lib"
+              }
+            }
 
-          $dstAec = "$libDir\libaec.lib"
-          if (!(Test-Path $dstAec)) {
-            Copy-Item $src $dstAec -Force
-            Write-Host "Created alias: libaec.lib -> aec.lib"
-          }
+          #  # HDF5 szip compatibility (libaec replaces sz)
+          #  $src = "$libDir\aec.lib"
+          #  $dst = "$libDir\libsz.lib"
+          #  if ((Test-Path $src) -and !(Test-Path $dst)) {
+          #    Copy-Item $src $dst
+          #    Write-Host "Created alias: libsz.lib -> aec.lib"
+          #  }
+          #& C:\vcpkg\vcpkg.exe list
 
-          $dstSz = "$libDir\libsz.lib"
-          if (!(Test-Path $dstSz)) {
-            Copy-Item $src $dstSz -Force
-            Write-Host "Created alias: libsz.lib -> aec.lib"
-          }
+            # Explicit AEC aliases
+            $src = "$libDir\aec.lib"
 
-          Get-Item $src, $dstAec, $dstSz | Select-Object Name, FullName, Length
+            if (!(Test-Path $src)) {
+              Write-Error "Expected AEC import library not found: $src"
+              Get-ChildItem $libDir | Where-Object { $_.Name -match 'aec|sz' } | Select-Object Name, FullName
+              exit 1
+            }
 
+            $dstAec = "$libDir\libaec.lib"
+            if (!(Test-Path $dstAec)) {
+              Copy-Item $src $dstAec -Force
+              Write-Host "Created alias: libaec.lib -> aec.lib"
+            }
+
+            $dstSz = "$libDir\libsz.lib"
+            if (!(Test-Path $dstSz)) {
+              Copy-Item $src $dstSz -Force
+              Write-Host "Created alias: libsz.lib -> aec.lib"
+            }
+
+            Get-Item $src, $dstAec, $dstSz | Select-Object Name, FullName, Length
       # ─────────────────────────────────────────────
-      # 6. Configure CMake
+      # 5. Configure CMake
       #    - CMakeLists.txt lives in cmake/ subdirectory
       #    - Disable Python/SWIG (C++ only build)
       #    - Disable Collada (avoids OpenCOLLADA dep)
@@ -180,7 +164,7 @@ jobs:
 
           # IfcOpenShell's CMake doesn't propagate include dirs to all
           # targets consistently. Inject the vcpkg root + OCCT includes
-          # globally so every target finds them.
+          # globally so every target (IfcGeom, kernels, etc.) finds them.
           $globalIncludes = "$occInclude;$vcpkgInclude"
 
           cmake -B build `
@@ -211,19 +195,20 @@ jobs:
             -S "${{ github.workspace }}\cmake"
 
       # ─────────────────────────────────────────────
-      # 7. Build
+      # 6. Build
       # ─────────────────────────────────────────────
       - name: Build IfcOpenShell
         run: cmake --build build --config ${{ env.BUILD_TYPE }} --parallel
 
       # ─────────────────────────────────────────────
-      # 8. Install to a clean directory
+      # 7. Install to a clean directory
       # ─────────────────────────────────────────────
       - name: Install
         run: cmake --install build --config ${{ env.BUILD_TYPE }}
 
       # ─────────────────────────────────────────────
-      # 9. Upload build artifacts
+      # 8. Upload build artifacts
+      #    Downloads from: Actions tab → workflow run → Artifacts
       # ─────────────────────────────────────────────
       - name: Upload IfcOpenShell build artifacts
         uses: actions/upload-artifact@v4
@@ -233,7 +218,8 @@ jobs:
           retention-days: 30
 
       # ─────────────────────────────────────────────
-      # 10. Upload build logs on failure
+      # 9. (Optional) Also upload the raw build dir
+      #    for debugging failed builds
       # ─────────────────────────────────────────────
       - name: Upload build logs on failure
         if: failure()
